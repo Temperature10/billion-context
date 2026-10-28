@@ -596,12 +596,40 @@ function resolveDerivedDecompress(
     return toolFail(`[Block ${blockId} not found]`);
 }
 
+// null means unknown/invalid schema (keep legacy text); an empty string is a
+// valid cleared/terminal snapshot and must not resurrect an older plan.
+function currentTodoText(msg: CoreMessage): string | null {
+    if ((msg.toolName !== "TodoWrite" && msg.toolName !== "todowrite") || !msg.text) return null;
+    const text = msg.text.replace(/^\s*\x3cacp\b[^\x3c\x3e]*\x3em\d+\x3c\/acp\x3e\s*/, "");
+    if (text.length > PLAN_TEXT_CHAR_CAP) return null;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        return null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const todos = (parsed as Record<string, unknown>).todos;
+    if (!Array.isArray(todos)) return null;
+    const active: string[] = [];
+    const pending: string[] = [];
+    for (const item of todos) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+        const { content, status } = item as Record<string, unknown>;
+        if (typeof content !== "string" || !content.trim()) return null;
+        if (status === "in_progress") active.push(content);
+        else if (status === "pending") pending.push(content);
+        else if (status !== "completed" && !(msg.toolName === "todowrite" && status === "cancelled")) return null;
+    }
+    return (active.length > 0 ? active : pending).join("\n");
+}
+
 /** Extract the current plan state from the in-context message view: the LAST
  *  tool call matching each planning pattern (mirrors the kernel's
  *  collectLatestProtected latest-wins semantics — per projected path for
  *  slash patterns, so `skill/*` keeps one slot per skill, #1947) plus the
  *  most recent user turn. Returns null when nothing usable is in context. */
-export function extractPlanState(messages: CoreMessage[], extraPatterns?: string[]): { terms: PlanTerms } | null {
+export function extractPlanState(messages: CoreMessage[], extraPatterns?: string[]): { terms: PlanTerms; statusAware?: true } | null {
     const patterns = [...new Set([...PLANNING_TOOL_PATTERNS, ...(extraPatterns ?? [])])];
     const start = Math.max(0, messages.length - PLAN_WINDOW_MESSAGES);
     const latestByPattern = new Map<string, CoreMessage>();
@@ -623,7 +651,13 @@ export function extractPlanState(messages: CoreMessage[], extraPatterns?: string
         }
     }
     const sources: Array<{ text: string; weight: number }> = [];
-    for (const msg of latestByPattern.values()) if (msg.text) sources.push({ text: msg.text, weight: 2 });
+    let statusAware = false;
+    for (const msg of latestByPattern.values()) {
+        if (!msg.text) continue;
+        const current = currentTodoText(msg);
+        if (current !== null) statusAware = true;
+        sources.push({ text: current ?? msg.text, weight: 2 });
+    }
     if (lastUserText) sources.push({ text: lastUserText, weight: 1 });
     if (sources.length === 0) return null;
     const terms: PlanTerms = new Map();
@@ -633,7 +667,8 @@ export function extractPlanState(messages: CoreMessage[], extraPatterns?: string
             terms.set(tok, (terms.get(tok) ?? 0) + weight);
         }
     }
-    return terms.size > 0 ? { terms } : null;
+    if (terms.size === 0) return null;
+    return statusAware ? { terms, statusAware: true } : { terms };
 }
 
 function planBlockScore(topic: string | undefined, summary: string, terms: PlanTerms): number {
@@ -803,8 +838,17 @@ export function executeSearchContext(
     if (plan && !foreignSessionId && pool.length > limit) {
         const planState = extractPlanState(plan.messages, plan.protectedPatterns);
         if (planState) {
-            const withScores = pool.map((b, i) => ({ b, i, score: planBlockScore(b.topic, b.summary, planState.terms) }));
-            withScores.sort((x, y) => y.score - x.score || x.i - y.i);
+            const queryTerms = planState.statusAware ? [...new Set(terms)] : [];
+            const withScores = pool.map((b, i) => {
+                const hay = `${b.topic ?? ""}\n${b.summary}`.toLowerCase();
+                return {
+                    b, i, score: planBlockScore(b.topic, b.summary, planState.terms),
+                    // Preserve explicit query evidence even when another term
+                    // is absent. Distinct raw terms retain identifiers/CJK.
+                    queryCoverage: queryTerms.filter((t) => hay.includes(t)).length,
+                };
+            });
+            withScores.sort((x, y) => y.queryCoverage - x.queryCoverage || y.score - x.score || x.i - y.i);
             ranked = withScores.map((s) => s.b);
             scored = withScores.map((s) => ({ block: s.b, score: s.score }));
             plan.log(`[acp-search-plan] "${query}": ${withScores.filter((s) => s.score > 0).length}/${pool.length} candidates plan-relevant → ${scored.slice(0, limit).map((s) => `${s.block.blockId}:${s.score}`).join(", ")}`);
