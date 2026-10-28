@@ -851,7 +851,10 @@ export function executeSearchContext(
             withScores.sort((x, y) => y.queryCoverage - x.queryCoverage || y.score - x.score || x.i - y.i);
             ranked = withScores.map((s) => s.b);
             scored = withScores.map((s) => ({ block: s.b, score: s.score }));
-            plan.log(`[acp-search-plan] "${query}": ${withScores.filter((s) => s.score > 0).length}/${pool.length} candidates plan-relevant → ${scored.slice(0, limit).map((s) => `${s.block.blockId}:${s.score}`).join(", ")}`);
+            const breakdown = withScores.slice(0, limit).map((s) => planState.statusAware
+                ? `${s.b.blockId}(query=${s.queryCoverage}/${queryTerms.length},plan=${s.score},original=${s.i + 1})`
+                : `${s.b.blockId}:${s.score}`).join(", ");
+            plan.log(`[acp-search-plan] "${query}": ${withScores.filter((s) => s.score > 0).length}/${pool.length} candidates plan-relevant → ${breakdown}`);
         }
     }
     const blocks = ranked.slice(0, limit);

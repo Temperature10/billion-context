@@ -6,6 +6,7 @@ import { executePlanRetrievalSearch } from "../scripts/eval-plan-state-retrieval
 import { legacyExtractPlanState, legacyFallbackMessages } from "./fixtures/legacy-plan-aware.ts";
 import { PLAN_RETRIEVAL_CASES } from "./fixtures/plan-state-retrieval-cases.ts";
 import { PLAN_QUERY_REGRESSION_CASES } from "./fixtures/plan-state-retrieval-query-regressions.ts";
+import { PLAN_RETRIEVAL_CHALLENGES } from "./fixtures/plan-state-retrieval-challenges.ts";
 
 test("legacy evaluation adapter preserves frozen terms at both sides of the inspection cap", () => {
     const snapshot = { todos: [{ content: "JWT authentication", status: "completed" }, { content: "token ratelimit", status: "in_progress" }], padding: "" };
@@ -74,3 +75,49 @@ test("reviewed query-regression supplement preserves explicit historical intent"
         assert.ok(fixture.relevantBlockIds.includes(result.blockIds[0]), fixture.id);
     }
 });
+
+test("status-only ablation isolates extraction gains from explicit-query protection", () => {
+    for (const fixture of PLAN_RETRIEVAL_CASES.filter((entry) => entry.category === "status-switch")) {
+        const ablation = executePlanRetrievalSearch(fixture, "status-only");
+        assert.ok(fixture.relevantBlockIds.includes(ablation.blockIds[0]), fixture.id);
+        assert.equal(ablation.text, null, "rank-only ablation must not claim rendered tool evidence");
+    }
+    for (const fixture of PLAN_QUERY_REGRESSION_CASES) {
+        const ablation = executePlanRetrievalSearch(fixture, "status-only");
+        const current = executePlanRetrievalSearch(fixture, "status-aware");
+        assert.ok(!fixture.relevantBlockIds.includes(ablation.blockIds[0]), fixture.id);
+        assert.ok(fixture.relevantBlockIds.includes(current.blockIds[0]), fixture.id);
+        assert.equal(ablation.candidateCount, current.candidateCount, fixture.id);
+    }
+});
+
+test("status-only ablation preserves legacy controls and the no-reranking gates", () => {
+    for (const fixture of PLAN_RETRIEVAL_CASES) {
+        for (const limit of [1, 3]) {
+            if (fixture.preserveLegacyOrder) {
+                assert.deepEqual(executePlanRetrievalSearch(fixture, "status-only", { limit }).blockIds,
+                    executePlanRetrievalSearch(fixture, "legacy", { limit }).blockIds, fixture.id);
+            }
+        }
+        for (const options of [{ limit: fixture.blocks.length }, { messages: [] }, { query: "no_matching_fixture_term" }]) {
+            assert.deepEqual(executePlanRetrievalSearch(fixture, "status-only", options).blockIds,
+                executePlanRetrievalSearch(fixture, "lexical", options).blockIds, fixture.id);
+        }
+    }
+});
+
+for (const fixture of PLAN_RETRIEVAL_CHALLENGES) {
+    test(`diversity challenge: ${fixture.id}`, () => {
+        const before = structuredClone(fixture);
+        for (const limit of [1, 3]) {
+            const current = executePlanRetrievalSearch(fixture, "status-aware", { limit });
+            assert.ok(current.candidateCount > limit, "the fixture must exercise reranking");
+            assert.ok(fixture.relevantBlockIds.includes(current.blockIds[0]), fixture.rationale);
+            assert.equal(new Set(current.blockIds).size, limit);
+            if (fixture.preserveLegacyOrder) {
+                assert.deepEqual(current.blockIds, executePlanRetrievalSearch(fixture, "legacy", { limit }).blockIds);
+            }
+        }
+        assert.deepEqual(fixture, before, "search and evaluation must not modify the fixture");
+    });
+}

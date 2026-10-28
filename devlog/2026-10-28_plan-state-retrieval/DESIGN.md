@@ -24,7 +24,11 @@ The initial design used a boolean full-query match. Independent review found fou
 
 Tests cover strict status swaps, active-versus-pending, terminal noise, latest empty/all-terminal snapshots, invalid/unknown/custom/incremental/oversized fallbacks, explicit history queries, CJK/punctuation, immutable inputs, disabled/foreign/small-pool paths, and an Anthropic HTTP tool-use fixture with unchanged forwarded arguments and cache breakpoints.
 
-A separately authored fixed corpus compares three arms using real core search. Rank metrics (P@1, recall and MRR at 3) are diagnostic, not task-completion metrics. An optional real-model experiment uses hidden task facts and deterministic output checks, separating fixed-query continuation from autonomous search. No fixture label is revised to hide a regression.
+A separately authored fixed corpus compares lexical, frozen legacy, and complete status-aware retrieval using real core search and rendering. A fourth, rank-only ablation feeds production-extracted terms into the frozen overlap sorter without query coverage; its `text` is null so it cannot be mistaken for a rendered tool call. Reusing this sorter keeps its baseline semantics independent and avoids another score implementation. No production flag is added for the ablation.
+
+Rank metrics (P@1 and MRR@3) are diagnostic, not task-completion metrics. Twenty additional review-time cases cover four domains, six behavior categories, and both sides of source/window bounds; their labels were recorded before execution, but they are not a held-out benchmark. Keep these and the earlier four regressions separate from the frozen 28-case denominator. An optional real-model experiment uses hidden task facts and deterministic output checks, separating fixed-query continuation from autonomous search. No fixture label is revised to hide a regression.
+
+For recognized snapshots, diagnostics expose each returned block's distinct-query coverage, plan score, and one-based original core rank in sort-key order. Legacy diagnostics retain their previous format; model-visible output and steering are unchanged.
 
 ## Sources and tradeoffs
 

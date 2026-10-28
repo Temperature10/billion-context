@@ -28,13 +28,13 @@ function block(id: string, summary: string, topic = id): CompressionBlock {
     };
 }
 
-function search(query: string, blocks: CompressionBlock[], messages: CoreMessage[]) {
+function search(query: string, blocks: CompressionBlock[], messages: CoreMessage[], log: (message: string) => void = () => {}) {
     const core = createCore();
     const state = createInitialState();
     state.blocks = blocks;
     const session = getSession(`plan-state-${Math.random().toString(36).slice(2)}`);
     const before = structuredClone({ state, messages, metadata: session.metadata });
-    const text = executeSearchContext({ query, limit: 1 }, core, state, undefined, { messages, session, log: () => {} }).text;
+    const text = executeSearchContext({ query, limit: 1 }, core, state, undefined, { messages, session, log }).text;
     assert.deepEqual({ state, messages, metadata: session.metadata }, before, "retrieval must be read-only");
     return { text, core, state, session };
 }
@@ -224,6 +224,27 @@ test("equal coverage and equal plan scores preserve the kernel order", () => {
     const result = search("token", blocks, messages);
     assert.equal(result.core.search("token", result.state)[0]?.blockId, "b1");
     assert.match(result.text, /\n\nb1 \(T1\)/);
+});
+
+test("ranking diagnostics explain query protection and stable ties without changing tool output", () => {
+    const messages = [call({ todos: [todo("authentication", "completed"), todo("ratelimit", "in_progress")] })];
+    const cases = [
+        { query: "token token authentication", blocks: [block("b1", "token authentication decisions"), block("b2", "token ratelimit ratelimit middleware")], breakdown: "query=2/2,plan=0" },
+        { query: "token", blocks: [block("b1", "token ratelimit history"), block("b2", "token ratelimit history")], breakdown: "query=1/1,plan=2" },
+    ];
+    for (const row of cases) {
+        const logs: string[] = [];
+        const result = search(row.query, row.blocks, messages, (message) => logs.push(message));
+        assert.equal(result.text, search(row.query, row.blocks, messages).text);
+        assert.match(result.text, /\n\nb1 \(T1\)/);
+        const originalRank = result.core.search(row.query, result.state).findIndex((entry) => entry.blockId === "b1") + 1;
+        assert.equal(logs.length, 1);
+        assert.ok(logs[0].endsWith(`b1(${row.breakdown},original=${originalRank})`), logs[0]);
+    }
+    const legacyLogs: string[] = [];
+    search("token authentication", cases[0].blocks, [call({ todos: [todo("ratelimit", "unknown")] })], (message) => legacyLogs.push(message));
+    assert.equal(legacyLogs.length, 1);
+    assert.ok(legacyLogs[0].endsWith("b2:4"), "unsupported schemas retain the original log format");
 });
 
 for (const row of PLAN_QUERY_REGRESSION_CASES) {

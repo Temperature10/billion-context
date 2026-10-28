@@ -13,11 +13,12 @@ import { executeSearchContext, extractPlanState } from "../src/decompress-shared
 import { createSession } from "../src/session.ts";
 import { PLAN_RETRIEVAL_CASES, type PlanRetrievalCase } from "../tests/fixtures/plan-state-retrieval-cases.ts";
 import { PLAN_QUERY_REGRESSION_CASES } from "../tests/fixtures/plan-state-retrieval-query-regressions.ts";
-import { LEGACY_PLAN_COMMIT, legacyExtractPlanState, legacyFallbackMessages, legacyPlanRank } from "../tests/fixtures/legacy-plan-aware.ts";
+import { PLAN_RETRIEVAL_CHALLENGES, type PlanChallengeCase } from "../tests/fixtures/plan-state-retrieval-challenges.ts";
+import { LEGACY_PLAN_COMMIT, legacyExtractPlanState, legacyFallbackMessages, legacyPlanRank, legacyRankTerms } from "../tests/fixtures/legacy-plan-aware.ts";
 
-type RetrievalArm = "lexical" | "legacy" | "status-aware";
-const RETRIEVAL_ARMS: readonly RetrievalArm[] = ["lexical", "legacy", "status-aware"];
-type PlanRetrievalInput = Pick<PlanRetrievalCase, "id" | "query" | "blocks" | "planningMessages" | "protectedPatterns">;
+type RetrievalArm = "lexical" | "legacy" | "status-only" | "status-aware";
+const RETRIEVAL_ARMS: readonly RetrievalArm[] = ["lexical", "legacy", "status-only", "status-aware"];
+type PlanRetrievalInput = Pick<PlanRetrievalCase | PlanChallengeCase, "id" | "query" | "blocks" | "planningMessages" | "protectedPatterns">;
 
 function messagesOf(fixture: PlanRetrievalInput): CoreMessage[] {
     return fixture.planningMessages.map((message, index) => ({
@@ -29,7 +30,7 @@ export function executePlanRetrievalSearch(
     fixture: PlanRetrievalInput,
     arm: RetrievalArm,
     options: { query?: string; limit?: number; messages?: CoreMessage[] } = {},
-): { blockIds: string[]; text: string; candidateCount: number } {
+): { blockIds: string[]; text: string | null; candidateCount: number } {
     const core = createCore();
     const session = createSession(`plan-retrieval-eval-${fixture.id}`);
     const blocks = fixture.blocks.map((block): CompressionBlock => ({
@@ -44,6 +45,13 @@ export function executePlanRetrievalSearch(
     const messages = options.messages ?? messagesOf(fixture);
     const protectedPatterns = fixture.protectedPatterns ? [...fixture.protectedPatterns] : undefined;
     const pool = core.search(query, session.state);
+    if (arm === "status-only") {
+        return {
+            blockIds: legacyRankTerms(pool, extractPlanState(messages, protectedPatterns)?.terms ?? null, limit),
+            text: null,
+            candidateCount: pool.length,
+        };
+    }
     const legacyMessages = arm === "legacy" ? legacyFallbackMessages(messages) : messages;
     if (arm === "legacy") {
         assert.deepEqual(legacyExtractPlanState(legacyMessages, protectedPatterns), legacyExtractPlanState(messages, protectedPatterns),
@@ -69,7 +77,7 @@ function metrics(top1: readonly string[], top3: readonly string[], relevant: rea
     };
 }
 
-function evaluatePlanRetrievalCase(fixture: PlanRetrievalCase) {
+function evaluatePlanRetrievalCase(fixture: PlanRetrievalCase | PlanChallengeCase) {
     const arms = Object.fromEntries(RETRIEVAL_ARMS.map((arm) => {
         const top1 = executePlanRetrievalSearch(fixture, arm, { limit: 1 });
         const top3 = executePlanRetrievalSearch(fixture, arm, { limit: 3 });
@@ -97,6 +105,10 @@ function evaluatePlanRetrievalCase(fixture: PlanRetrievalCase) {
                 precisionAt1: arms["status-aware"].precisionAt1 - arms.legacy.precisionAt1,
                 reciprocalRankAt3: arms["status-aware"].reciprocalRankAt3 - arms.legacy.reciprocalRankAt3,
             },
+            versusStatusOnly: {
+                precisionAt1: arms["status-aware"].precisionAt1 - arms["status-only"].precisionAt1,
+                reciprocalRankAt3: arms["status-aware"].reciprocalRankAt3 - arms["status-only"].reciprocalRankAt3,
+            },
         },
     };
 }
@@ -112,7 +124,7 @@ function aggregate(results: readonly CaseResult[]) {
 }
 
 function pairedChanges(results: readonly CaseResult[]) {
-    return Object.fromEntries((["lexical", "legacy"] as const).map((baseline) => [baseline,
+    return Object.fromEntries((["lexical", "legacy", "status-only"] as const).map((baseline) => [baseline,
         Object.fromEntries((["precisionAt1", "reciprocalRankAt3"] as const).map((metric) => {
             const differences = results.map((result) => result.arms["status-aware"][metric] - result.arms[baseline][metric]);
             return [metric, {
@@ -128,15 +140,18 @@ function pairedChanges(results: readonly CaseResult[]) {
 function runPlanRetrievalEvaluation() {
     const cases = PLAN_RETRIEVAL_CASES.map(evaluatePlanRetrievalCase);
     const queryRegressions = PLAN_QUERY_REGRESSION_CASES.map(evaluatePlanRetrievalCase);
+    const challenges = PLAN_RETRIEVAL_CHALLENGES.map(evaluatePlanRetrievalCase);
+    const challengeCategories = [...new Set(PLAN_RETRIEVAL_CHALLENGES.map((fixture) => fixture.category))];
     const categories = [...new Set(PLAN_RETRIEVAL_CASES.map((fixture) => fixture.category))];
     const corpusPath = fileURLToPath(new URL("../tests/fixtures/plan-state-retrieval-cases.ts", import.meta.url));
     return {
-        protocol: "Synthetic fixed corpus; real core.search and executeSearchContext; no model calls or autonomous-agent success claims.",
+        protocol: "Synthetic fixed corpus; real core.search for all arms. Lexical/legacy/status-aware use executeSearchContext; status-only is rank-only ablation. No model calls or autonomous-agent success claims.",
         legacyCommit: LEGACY_PLAN_COMMIT,
         legacyRenderingMethod: "Append a tokenizer-ignored ! to known snapshot tools to exercise the actual raw-text fallback; assert its terms and returned ranks against the frozen pre-change implementation.",
+        statusOnlyMethod: "Production extractPlanState terms with the frozen overlap score/order and the same candidate-count gate; query coverage disabled. text=null because this diagnostic does not render tool output and is not a production mode.",
         corpusSha256: createHash("sha256").update(readFileSync(corpusPath)).digest("hex"),
         corpusContentSha256: createHash("sha256").update(JSON.stringify(PLAN_RETRIEVAL_CASES)).digest("hex"),
-        metricDefinition: "P@1 from a limit=1 tool call; MRR@3 from a separate limit=3 tool call; either accepted label counts for multi-relevant cases.",
+        metricDefinition: "P@1 at limit=1; MRR@3 at limit=3, using separate tool calls (rank-only for status-only). Either accepted label counts for multi-relevant cases.",
         overall: aggregate(cases),
         byCategory: Object.fromEntries(categories.map((category) => [category, aggregate(cases.filter((result) => result.fixture.category === category))])),
         pairedChanges: {
@@ -150,6 +165,15 @@ function runPlanRetrievalEvaluation() {
             overall: aggregate(queryRegressions),
             pairedChanges: pairedChanges(queryRegressions),
             cases: queryRegressions,
+        },
+        challengeSupplement: {
+            protocol: "Twenty review-time diagnostic cases across four domains and six behavior categories, authored after implementation with labels recorded before execution. Includes compatibility-contract oracles; not held-out task-quality evidence and not pooled into the original 28 cases.",
+            corpusContentSha256: createHash("sha256").update(JSON.stringify(PLAN_RETRIEVAL_CHALLENGES)).digest("hex"),
+            overall: aggregate(challenges),
+            byCategory: Object.fromEntries(challengeCategories.map((category) => [category, aggregate(challenges.filter((result) => result.fixture.category === category))])),
+            pairedChanges: pairedChanges(challenges),
+            compatibility: { cases: challenges.filter((result) => result.fixture.preserveLegacyOrder).length, failedIds: challenges.filter((result) => !result.compatibilityPassed).map((result) => result.fixture.id) },
+            cases: challenges,
         },
         cases,
     };
@@ -172,9 +196,12 @@ function main() {
     for (const [category, values] of Object.entries(report.byCategory)) { console.log(category); console.table(values); }
     console.log("Review-time query regression supplement (separate from frozen corpus)");
     console.table(report.queryRegressionSupplement.overall);
+    console.log("Review-time diversity challenge supplement (separate diagnostic corpus)");
+    console.table(report.challengeSupplement.overall);
     console.table(report.cases.map((result) => ({
         id: result.fixture.id, expected: result.fixture.relevantBlockIds.join("|"),
         lexical: result.arms.lexical.top1.blockIds.join(","), legacy: result.arms.legacy.top1.blockIds.join(","),
+        statusOnly: result.arms["status-only"].top1.blockIds.join(","),
         current: result.arms["status-aware"].top1.blockIds.join(","),
         deltaP1: result.pairedChange.versusLegacy.precisionAt1,
         deltaMRR3: Number(result.pairedChange.versusLegacy.reciprocalRankAt3.toFixed(3)),
@@ -187,6 +214,7 @@ function main() {
         console.log(`Wrote ${output}`);
     }
     assert.deepEqual(report.compatibility.failedIds, [], "unsupported-input compatibility controls must pass");
+    assert.deepEqual(report.challengeSupplement.compatibility.failedIds, [], "challenge compatibility controls must pass");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

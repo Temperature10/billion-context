@@ -2,6 +2,7 @@
  * Evaluation-only reference frozen from src/decompress-shared.ts at
  * b0b0e66ff085b08e8e26c02f1f79ad2a8849a496. Keep this independent of the new
  * extractor/ranker so regressions cannot silently redefine the baseline.
+ * The unchanged overlap sorter also accepts extracted terms for ablation.
  * Kernel tool-pattern matching is unchanged by this experiment.
  */
 import { matchToolMessagePattern, toolPathOf, type CompressionBlock, type CoreMessage } from "acp-kernel";
@@ -88,9 +89,12 @@ export function legacyPlanRank(
     limit: number,
     extraPatterns?: string[],
 ): string[] {
-    const plan = legacyExtractPlanState(messages, extraPatterns);
-    if (!plan || pool.length <= limit) return pool.slice(0, limit).map((block) => block.blockId);
-    return pool.map((block, index) => ({ block, index, score: planBlockScore(block.topic, block.summary, plan.terms) }))
+    return legacyRankTerms(pool, legacyExtractPlanState(messages, extraPatterns)?.terms ?? null, limit);
+}
+
+export function legacyRankTerms(pool: readonly CompressionBlock[], terms: Map<string, number> | null, limit: number): string[] {
+    if (!terms || pool.length <= limit) return pool.slice(0, limit).map((block) => block.blockId);
+    return pool.map((block, index) => ({ block, index, score: planBlockScore(block.topic, block.summary, terms) }))
         .sort((a, b) => b.score - a.score || a.index - b.index)
         .slice(0, limit)
         .map(({ block }) => block.blockId);

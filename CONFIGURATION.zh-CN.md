@@ -1525,7 +1525,7 @@ ACP 原生 agent（当前为 `pi` 扩展）会在每个进程内向代理上报�
 
   候选块的 topic/summary 与提取状态做加权词项重叠打分。提取时识别到有效快照后，先比较每个候选命中的不同查询词数量，再比较计划分数，最后保留原词法顺序。查询词转小写后按空白切分，带标点的标识符和连续中文短语保持完整。在所有候选中都不存在的词，不会覆盖其余查询证据。这是字面匹配，不代表语义理解。没有识别到有效快照时，保持旧的计划分数排序。已完成任务对应的块仍可检索，改变的只是任务信号。
 
-  重排可能改变返回子集，并追加 `[plan-aware]` 引导段：(a) `top fetch targets:` 按排名列出计划分数为正的返回块所覆盖的 ref 区间；(b) 对本会话内已 retrieve ≥2 次的覆盖 ref，建议改用一次性 `decompress({blockId, startId, endId})` 区间恢复。标志关闭、没有可用的计划或用户信号、或命中池本就在 `limit` 之内时，输出与功能引入前逐字节一致。重排只改变候选顺序：不删除块，不改存储、折叠、注入机制或持久化，跨会话搜索（`conversation_id`）保持只读词法。每次重排记录 `[acp-search-plan] …` 日志，包含逐块计划分数。配套统计：整块 decompress 计入 `acp_status` 的 `RETRIEVAL QUALITY` 行（总数及其中存在更便宜精确路径的次数，即块带有 ref 区间且 CCR 已武装），便于启用前后度量 retrieve 与 decompress 的取舍。子字段（按字段最深层级胜出，与其他 CompressSettings 字段一致）：
+  重排可能改变返回子集，并追加 `[plan-aware]` 引导段：(a) `top fetch targets:` 按排名列出计划分数为正的返回块所覆盖的 ref 区间；(b) 对本会话内已 retrieve ≥2 次的覆盖 ref，建议改用一次性 `decompress({blockId, startId, endId})` 区间恢复。标志关闭、没有可用的计划或用户信号、或命中池本就在 `limit` 之内时，输出与功能引入前逐字节一致。重排只改变候选顺序：不删除块，不改存储、折叠、注入机制或持久化，跨会话搜索（`conversation_id`）保持只读词法。每次重排记录 `[acp-search-plan] …` 日志。识别到完整状态快照时，逐块记录查询词覆盖数、计划分数和从 1 开始的原始排名，例如 `b1(query=2/3,plan=0,original=2)`；旧版文本提取路径保留仅含计划分数的日志格式。配套统计：整块 decompress 计入 `acp_status` 的 `RETRIEVAL QUALITY` 行（总数及其中存在更便宜精确路径的次数，即块带有 ref 区间且 CCR 已武装），便于启用前后度量 retrieve 与 decompress 的取舍。子字段（按字段最深层级胜出，与其他 CompressSettings 字段一致）：
   - `planAware: boolean` — 总开关；非 `true` 一律保持功能完全关闭。
 
 #### `rules`

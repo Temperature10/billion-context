@@ -20,3 +20,12 @@ This is a bounded improvement to the feature shipped in #1419 / #1336, not a new
 ## Out of scope
 
 Incremental TaskCreate/TaskUpdate reconstruction, embedding/LLM ranking, automatic retrieval, new memory stores, new tuning knobs, default-on rollout, release or merge.
+
+## Review follow-up acceptance criteria
+
+- Add a status-only ablation using the production extractor, real candidate pool, and frozen overlap ranker without query coverage. Mark it as rank-only evidence, with no fabricated tool output or model-continuation claims.
+- Keep all 28 original cases and four separate review regressions unchanged; report per-case, category, and paired ablation results, including failures.
+- Log query coverage, plan score, and original rank for recognized snapshots. Preserve legacy log formatting and all model-visible search output.
+- Reuse the frozen score/order implementation for the ablation; retain independent legacy extraction and compatibility assertions.
+- Validate against current upstream, update the existing PR with additive commits, and report CI separately from local checks. Preserve the provenance of the earlier paid-model experiment.
+- Add a separate review-time challenge set across payments, RAG, Agent orchestration, and deployments. Declare labels before running it, cover both structured and fallback paths, and keep its metrics separate from the original corpus and live-model experiment.
