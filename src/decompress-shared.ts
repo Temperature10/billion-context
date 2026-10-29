@@ -799,7 +799,7 @@ function evidenceSnippet(summary: string, terms: string[], freq: Map<string, num
 // #2751: for a long multi-term query, if a term is absent from every returned
 // block yet present in lower-ranked candidates, steer the model to narrow to it
 // rather than reading "absent from top-N" as "absent from history". At most once.
-function narrowingHint(terms: string[], returned: CompressionBlock[], ranked: CompressionBlock[]): string {
+function narrowingHint(terms: string[], returned: CompressionBlock[], ranked: CompressionBlock[], hintTerms = terms): string {
     if (terms.length < 3) return "";
     const returnedSet = new Set(returned);
     const lowerCands = ranked.filter((b) => !returnedSet.has(b));
@@ -807,7 +807,7 @@ function narrowingHint(terms: string[], returned: CompressionBlock[], ranked: Co
     const contains = (b: CompressionBlock, tl: string): boolean =>
         (b.topic ?? "").toLowerCase().includes(tl) || b.summary.toLowerCase().includes(tl);
     let best: { term: string; count: number } | null = null;
-    for (const t of terms) {
+    for (const t of hintTerms) {
         const tl = t.toLowerCase();
         if (!tl) continue;
         if (returned.some((b) => contains(b, tl))) continue;
@@ -817,6 +817,19 @@ function narrowingHint(terms: string[], returned: CompressionBlock[], ranked: Co
     }
     if (!best) return "";
     return `[tip: none of the top ${returned.length} results contain "${best.term}" but ${best.count} lower-ranked candidate(s) do — try searching "${best.term}" alone to surface its block directly]`;
+}
+
+// Query words are not plan tokens: preserve short identifiers, punctuation,
+// CJK phrases and negation. Grammar is secondary evidence, never discarded.
+const QUERY_GRAMMAR_WORDS = new Set([
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "what", "who", "which", "where", "when", "why", "how",
+]);
+
+function isQueryGrammarWord(term: string): boolean {
+    // Classify sentence punctuation only; matching still uses the raw term.
+    // Quotes/backticks and identifier punctuation retain literal significance.
+    return QUERY_GRAMMAR_WORDS.has(term.replace(/^[,.;:!?()]+|[,.;:!?()]+$/g, ""));
 }
 
 export function executeSearchContext(
@@ -834,25 +847,29 @@ export function executeSearchContext(
     const pool = core.search(query, state);
     const freq = poolTermFrequency(pool, terms);
     let ranked = pool;
+    let hintTerms = terms;
     let scored: Array<{ block: CompressionBlock; score: number }> | null = null;
     if (plan && !foreignSessionId && pool.length > limit) {
         const planState = extractPlanState(plan.messages, plan.protectedPatterns);
         if (planState) {
             const queryTerms = planState.statusAware ? [...new Set(terms)] : [];
+            const contentTerms = queryTerms.filter((term) => !isQueryGrammarWord(term));
+            if (contentTerms.length > 0) hintTerms = contentTerms;
             const withScores = pool.map((b, i) => {
                 const hay = `${b.topic ?? ""}\n${b.summary}`.toLowerCase();
                 return {
                     b, i, score: planBlockScore(b.topic, b.summary, planState.terms),
+                    contentCoverage: contentTerms.filter((t) => hay.includes(t)).length,
                     // Preserve explicit query evidence even when another term
                     // is absent. Distinct raw terms retain identifiers/CJK.
                     queryCoverage: queryTerms.filter((t) => hay.includes(t)).length,
                 };
             });
-            withScores.sort((x, y) => y.queryCoverage - x.queryCoverage || y.score - x.score || x.i - y.i);
+            withScores.sort((x, y) => y.contentCoverage - x.contentCoverage || y.queryCoverage - x.queryCoverage || y.score - x.score || x.i - y.i);
             ranked = withScores.map((s) => s.b);
             scored = withScores.map((s) => ({ block: s.b, score: s.score }));
             const breakdown = withScores.slice(0, limit).map((s) => planState.statusAware
-                ? `${s.b.blockId}(query=${s.queryCoverage}/${queryTerms.length},plan=${s.score},original=${s.i + 1})`
+                ? `${s.b.blockId}(${contentTerms.length < queryTerms.length ? `content=${s.contentCoverage}/${contentTerms.length},` : ""}query=${s.queryCoverage}/${queryTerms.length},plan=${s.score},original=${s.i + 1})`
                 : `${s.b.blockId}:${s.score}`).join(", ");
             plan.log(`[acp-search-plan] "${query}": ${withScores.filter((s) => s.score > 0).length}/${pool.length} candidates plan-relevant → ${breakdown}`);
         }
@@ -882,7 +899,7 @@ export function executeSearchContext(
     const truncNote = ranked.length > blocks.length
         ? `\n\n[truncated: showing ${blocks.length} of ${ranked.length} candidates by relevance — pass limit:${ranked.length} to see the rest]`
         : "";
-    const tip = narrowingHint(terms, blocks, ranked);
+    const tip = narrowingHint(terms, blocks, ranked, hintTerms);
     const tipNote = tip ? `\n\n${tip}` : "";
     const note = foreignSessionId
         ? `\n\n[Read-only search of historical session ${foreignSessionId}. Block ids are per-session namespaces — decompress acts on the current session only. For bulk content use bili export ${foreignSessionId} [--full].]`
